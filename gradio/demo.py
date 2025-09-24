@@ -7,6 +7,12 @@ from inference import inference_patch
 import datetime
 import subprocess
 import os
+from multi_instruments import (
+    MULTI_INSTRUMENT_PRESETS, 
+    EXTENDED_INSTRUMENTS,
+    INSTRUMENT_MIDI_PROGRAMS,
+    is_multi_instrument_prompt
+)
 
 # Predefined valid combinations set
 with open('prompts.txt', 'r') as f:
@@ -16,6 +22,18 @@ for prompt in prompts:
     prompt = prompt.strip()
     parts = prompt.split('_')
     valid_combinations.add((parts[0], parts[1], parts[2]))
+
+# Add multi-instrument combinations to valid combinations
+# For each existing period-composer combination, add multi-instrument options
+base_period_composer = {(p, c) for p, c, _ in valid_combinations}
+for period, composer in base_period_composer:
+    # Add common multi-instrument presets
+    for preset_name in MULTI_INSTRUMENT_PRESETS.keys():
+        valid_combinations.add((period, composer, preset_name))
+    
+    # Add individual instruments
+    for instrument in INSTRUMENT_MIDI_PROGRAMS.keys():
+        valid_combinations.add((period, composer, instrument))
 
 # Generate available options
 periods = sorted({p for p, _, _ in valid_combinations})
@@ -84,7 +102,55 @@ def save_and_convert(abc_content, period, composer, instrumentation):
 
 
 
+def generate_music_multi(period, composer, traditional_instrumentation, preset_instrumentation, custom_instrumentation):
+    # Determine which instrumentation to use
+    if custom_instrumentation.strip():
+        instrumentation = custom_instrumentation.strip()
+    elif preset_instrumentation:
+        instrumentation = preset_instrumentation
+    elif traditional_instrumentation:
+        instrumentation = traditional_instrumentation
+    else:
+        raise gr.Error("Please select an instrumentation method!")
+    
+    # Validate the combination
+    if (period, composer, instrumentation) not in valid_combinations and not is_multi_instrument_prompt(instrumentation):
+        raise gr.Error("Invalid prompt combination! Please re-select from the period options")
+    
+    output_queue = queue.Queue()
+    original_stdout = sys.stdout
+    sys.stdout = RealtimeStream(output_queue)
+    
+    result_container = []
+    def run_inference():
+        try:
+            result_container.append(inference_patch(period, composer, instrumentation))
+        finally:
+            sys.stdout = original_stdout
+    
+    thread = threading.Thread(target=run_inference)
+    thread.start()
+    
+    process_output = ""
+    while thread.is_alive():
+        try:
+            text = output_queue.get(timeout=0.1)
+            process_output += text
+            yield process_output, None  
+        except queue.Empty:
+            continue
+    
+    while not output_queue.empty():
+        text = output_queue.get()
+        process_output += text
+        yield process_output, None
+    
+    final_result = result_container[0] if result_container else ""
+    yield process_output, final_result
+
+
 def generate_music(period, composer, instrumentation):
+    # Legacy function for backward compatibility
     if (period, composer, instrumentation) not in valid_combinations:
         raise gr.Error("Invalid prompt combination! Please re-select from the period options")
     
@@ -120,7 +186,8 @@ def generate_music(period, composer, instrumentation):
     yield process_output, final_result
 
 with gr.Blocks() as demo:
-    gr.Markdown("## NotaGen")
+    gr.Markdown("## NotaGen - Enhanced Multi-Instrument Support")
+    gr.Markdown("Generate music with multiple specific instruments! Use formats like 'Piano+Violin', 'String Quartet', or choose from presets.")
     
     with gr.Row():
         # 左侧栏
@@ -140,9 +207,26 @@ with gr.Blocks() as demo:
             instrument_dd = gr.Dropdown(
                 choices=[],
                 value=None,
-                label="Instrumentation",
+                label="Instrumentation (Traditional)",
                 interactive=False
             )
+            
+            gr.Markdown("### Multi-Instrument Options")
+            
+            multi_instrument_presets = gr.Dropdown(
+                choices=[""] + list(MULTI_INSTRUMENT_PRESETS.keys()),
+                value="",
+                label="Preset Combinations",
+                interactive=True
+            )
+            
+            custom_instruments = gr.Textbox(
+                label="Custom Instruments (e.g., Piano+Violin+Cello)",
+                placeholder="Enter instruments separated by '+' (e.g., Piano+Violin)",
+                interactive=True
+            )
+            
+            gr.Markdown("**Available Instruments:** " + ", ".join(sorted(INSTRUMENT_MIDI_PROGRAMS.keys())))
             
             generate_btn = gr.Button("Generate!", variant="primary")
             
@@ -187,14 +271,26 @@ with gr.Blocks() as demo:
     )
     
     generate_btn.click(
-        generate_music,
-        inputs=[period_dd, composer_dd, instrument_dd],
+        generate_music_multi,
+        inputs=[period_dd, composer_dd, instrument_dd, multi_instrument_presets, custom_instruments],
         outputs=[process_output, final_output]
     )
     
+    # Update save function to handle multi-instrument inputs
+    def save_and_convert_multi(abc_content, period, composer, traditional_inst, preset_inst, custom_inst):
+        # Determine the instrumentation used
+        if custom_inst.strip():
+            instrumentation = custom_inst.strip()
+        elif preset_inst:
+            instrumentation = preset_inst
+        else:
+            instrumentation = traditional_inst
+            
+        return save_and_convert(abc_content, period, composer, instrumentation)
+    
     save_btn.click(
-        save_and_convert,
-        inputs=[final_output, period_dd, composer_dd, instrument_dd],
+        save_and_convert_multi,
+        inputs=[final_output, period_dd, composer_dd, instrument_dd, multi_instrument_presets, custom_instruments],
         outputs=[save_status]
     )
 

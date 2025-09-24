@@ -8,6 +8,14 @@ from transformers import GPT2Config
 from abctoolkit.utils import Exclaim_re, Quote_re, SquareBracket_re, Barline_regexPattern
 from abctoolkit.transpose import Note_list, Pitch_sign_list
 from abctoolkit.duration import calculate_bartext_duration
+from multi_instruments import (
+    parse_instrument_specification, 
+    generate_abc_voice_section, 
+    is_multi_instrument_prompt,
+    post_process_multi_instrument,
+    MULTI_INSTRUMENT_PRESETS,
+    EXTENDED_INSTRUMENTS
+)
 
 Note_list = Note_list + ['z', 'x']
 
@@ -186,11 +194,37 @@ def rest_unreduce(abc_lines):
 
 
 def inference_patch(period, composer, instrumentation):
+    
+    # Handle multi-instrument specifications
+    if is_multi_instrument_prompt(instrumentation):
+        # Parse the instrumentation into individual instruments
+        instruments = parse_instrument_specification(instrumentation)
+        print(f"Multi-instrument generation: {instruments}")
+        
+        # For multi-instrument generation, we still use the original category 
+        # but inject voice structure into the generated music
+        # Map to closest existing category for model prompt
+        if "Piano" in instruments and len(instruments) > 1:
+            model_instrumentation = "Chamber"  # Piano with other instruments
+        elif any(inst in ["Violin", "Viola", "Cello", "Double Bass"] for inst in instruments):
+            model_instrumentation = "Chamber"  # String instruments
+        elif any(inst in ["Voice", "Soprano", "Alto", "Tenor", "Bass", "Choir"] for inst in instruments):
+            if "Piano" in instruments:
+                model_instrumentation = "Art Song"  # Voice with piano
+            else:
+                model_instrumentation = "Choral"  # Voice only
+        elif len(instruments) == 1 and instruments[0] == "Piano":
+            model_instrumentation = "Keyboard"
+        else:
+            model_instrumentation = "Chamber"  # Default for multi-instrument
+    else:
+        model_instrumentation = instrumentation
+        instruments = None
 
     prompt_lines=[
     '%' + period + '\n',
     '%' + composer + '\n',
-    '%' + instrumentation + '\n']
+    '%' + model_instrumentation + '\n']
 
     while True:
 
@@ -305,6 +339,11 @@ def inference_patch(period, composer, instrumentation):
                     pass
                 else:
                     unreduced_abc_lines = [line for line in unreduced_abc_lines if not(line.startswith('%') and not line.startswith('%%'))]
+                    
+                    # Post-process for multi-instrument generation
+                    if instruments:
+                        unreduced_abc_lines = post_process_multi_instrument(unreduced_abc_lines, instruments)
+                    
                     unreduced_abc_lines = ['X:1\n'] + unreduced_abc_lines
                     unreduced_abc_text = ''.join(unreduced_abc_lines)
                     return unreduced_abc_text
